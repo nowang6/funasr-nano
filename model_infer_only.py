@@ -18,28 +18,6 @@ import json
 
 dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
-# 删除特定类型的键
-def clean_dict_for_json(data_dict):
-    # 方法1：删除包含 WavFrontend 对象的键
-    keys_to_remove = []
-    for key, value in data_dict.items():
-        # 检查值是否为 WavFrontend 类型
-        if hasattr(value, '__class__') and 'WavFrontend' in str(value.__class__):
-            keys_to_remove.append(key)
-        # 检查值是否为 WavFrontend 类型
-        if hasattr(value, '__class__') and 'Qwen2TokenizerFast' in str(value.__class__):
-            keys_to_remove.append(key)
-        
-        # 检查值是否为 WavFrontend 类型
-        if hasattr(value, '__class__') and 'Tokenizer' in str(value.__class__):
-            keys_to_remove.append(key)
-    
-    
-    # 删除这些键
-    for key in keys_to_remove:
-        del data_dict[key]
-    
-    return     
 
 @tables.register("model_classes", "FunASRNano")
 class FunASRNano(nn.Module):
@@ -54,9 +32,6 @@ class FunASRNano(nn.Module):
         input_size: int = 80,
         **kwargs,
     ):
-        data_dict = clean_dict_for_json(kwargs.copy())
-        with open('data.json', 'w', encoding='utf-8') as f:
-            json.dump(data_dict, f, ensure_ascii=False, indent=4) 
         super().__init__()
         encoder_class = tables.encoder_classes.get(audio_encoder)
         audio_encoder = encoder_class(input_size=input_size, **audio_encoder_conf)
@@ -494,6 +469,15 @@ class FunASRNano(nn.Module):
             inputs_embeds = inputs_embeds.to(dtype_map[llm_dtype])
             llm_kwargs = kwargs.get("llm_kwargs", {})
             
+            # 当 teachforing=False（默认）时：
+                # 使用 self.llm.generate() 进行自回归生成
+                # 模型基于输入逐步生成输出
+                # 这是正常的推理模式
+            # 当 teachforing=True 时：
+                # 使用 self.llm() 进行前向传播
+                # 使用真实标签（ground truth）计算 loss
+                # 从 logits 中直接提取预测结果，而不是生成
+                # 通常用于评估或调试
             if not kwargs.get("teachforing", False):
                 generated_ids = self.llm.generate(
                     inputs_embeds=inputs_embeds,
