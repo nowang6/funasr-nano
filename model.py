@@ -54,9 +54,11 @@ class FunASRNano(nn.Module):
                 else model.model.encoder
             )
         else:
+            # audio_encoder=SenceVoiceEncoderSmall
             encoder_class = tables.encoder_classes.get(audio_encoder)
             audio_encoder = encoder_class(input_size=input_size, **audio_encoder_conf)
             audio_encoder_output_size = audio_encoder.output_size()
+        #freeze 默认值为 True，即默认冻结 audio_encoder，不参与训练
         freeze = audio_encoder_conf.get("freeze", True)
         freeze_layer_num = int(audio_encoder_conf.get("freeze_layer_num", -1))
 
@@ -109,14 +111,18 @@ class FunASRNano(nn.Module):
         llm_dim = model.get_input_embeddings().weight.shape[-1]
 
         # adaptor
+        # audio_adaptor=Transfomer
         adaptor_class = tables.adaptor_classes.get(audio_adaptor)
         if audio_encoder_output_size > 0:
             audio_adaptor_conf["encoder_dim"] = audio_encoder_output_size
         audio_adaptor_conf["llm_dim"] = (
             llm_dim if llm_dim is not None else audio_adaptor_conf["llm_dim"]
         )
+        
+        # 加载权重在funasr/auto/auto_model.py的build_model方法中
         audio_adaptor = adaptor_class(**audio_adaptor_conf)
         freeze = audio_adaptor_conf.get("freeze", False)
+        # freeze 默认值为 False，即默认不冻结 audio_adaptor，参与训练
         if freeze:
             for name, param in audio_adaptor.named_parameters():
                 param.requires_grad = False
@@ -467,9 +473,12 @@ class FunASRNano(nn.Module):
         speech = batch["speech"]
 
         if len(speech) > 0:
+            #检查 kwargs 中是否同时存在 "audio_embedding" 和 "audio_embedding_lens"。
+            # 如果都存在：直接使用预计算的嵌入，跳过编码步骤
             if "audio_embedding" in kwargs and "audio_embedding_lens" in kwargs:
                 encoder_out = kwargs["audio_embedding"]
                 encoder_out_lens = kwargs["audio_embedding_lens"]
+            #执行正常编码流程
             else:
                 speech_lengths = batch["speech_lengths"][:, 0]
                 # fp16
@@ -478,6 +487,9 @@ class FunASRNano(nn.Module):
                 elif kwargs.get("bf16", False):
                     speech = speech.to(torch.bfloat16)
                 # audio encoder
+                # speech.shape [batch_size, feature_dim, frames]
+                # 560 = feature_dim（特征维度，fbank 特征数）
+                # 1351 = frames（时间帧数，与音频长度相关）
                 encoder_out, encoder_out_lens = self.encode(speech, speech_lengths)
 
                 # audio_adaptor
@@ -589,7 +601,13 @@ class FunASRNano(nn.Module):
                     ]
                 )
         data_in = new_data_in
-
+        
+        
+        # 当调用 inference 时未提供 key 参数
+        # 需要为每个输入数据分配唯一标识，可能用于：
+        # 追踪和匹配推理结果
+        # 缓存管理
+        # 日志记录
         if key is None:
             key = []
             for _ in data_in:
@@ -616,6 +634,7 @@ class FunASRNano(nn.Module):
         frontend=None,
         **kwargs,
     ):
+        # 把音频转换为embeds
         inputs_embeds, contents, batch, source_ids, meta_data = self.inference_prepare(
             data_in, data_lengths, key, tokenizer, frontend, **kwargs
         )
@@ -631,6 +650,16 @@ class FunASRNano(nn.Module):
             self.llm = self.llm.to(dtype_map[llm_dtype])
             inputs_embeds = inputs_embeds.to(dtype_map[llm_dtype])
             llm_kwargs = kwargs.get("llm_kwargs", {})
+            
+            # 当 teachforing=False（默认）时：
+                # 使用 self.llm.generate() 进行自回归生成
+                # 模型基于输入逐步生成输出
+                # 这是正常的推理模式
+            # 当 teachforing=True 时：
+                # 使用 self.llm() 进行前向传播
+                # 使用真实标签（ground truth）计算 loss
+                # 从 logits 中直接提取预测结果，而不是生成
+                # 通常用于评估或调试
             if not kwargs.get("teachforing", False):
                 generated_ids = self.llm.generate(
                     inputs_embeds=inputs_embeds,
