@@ -15,6 +15,7 @@ from funasr.utils.datadir_writer import DatadirWriter
 from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
 from transformers import AutoConfig, AutoModelForCausalLM
 from funasr.models.sense_voice.model import SenseVoiceEncoderSmall
+from funasr.models.llm_asr.adaptor import Transformer
 
 dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
@@ -35,15 +36,10 @@ class FunASRNano(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        
+        # audio_encoder
         audio_encoder = SenseVoiceEncoderSmall(input_size=input_size, **audio_encoder_conf)
-        audio_encoder_output_size = audio_encoder.output_size()
-    
-        freeze = audio_encoder_conf.get("freeze", True)
-        if freeze:
-            for name, param in audio_encoder.named_parameters():
-                param.requires_grad = False
-            audio_encoder.eval()
-        self.audio_encoder = audio_encoder
+        audio_encoder_output_size = audio_encoder.output_size() # 512
         
         # llm
         init_param_path = llm_conf.get("init_param_path", None)
@@ -54,33 +50,19 @@ class FunASRNano(nn.Module):
         llm_dim = model.get_input_embeddings().weight.shape[-1]
 
         # adaptor
-        adaptor_class = tables.adaptor_classes.get(audio_adaptor)
-        if audio_encoder_output_size > 0:
-            audio_adaptor_conf["encoder_dim"] = audio_encoder_output_size
-        audio_adaptor_conf["llm_dim"] = (
-            llm_dim if llm_dim is not None else audio_adaptor_conf["llm_dim"]
-        )
+        audio_adaptor_conf["encoder_dim"] = 512
+        audio_adaptor_conf["llm_dim"] = 1024
         
-        audio_adaptor = adaptor_class(**audio_adaptor_conf)
-        freeze = audio_adaptor_conf.get("freeze", False)
-        if freeze:
-            for name, param in audio_adaptor.named_parameters():
-                param.requires_grad = False
-            audio_adaptor.eval()
+        audio_adaptor = Transformer(**audio_adaptor_conf)
         self.audio_adaptor = audio_adaptor
 
-        self.feat_permute = audio_encoder_conf.get("feat_permute", True)
-        rank = int(os.environ.get("RANK", 0))
-        logging.info(f"rank: {rank}, model is builded.")
+        self.feat_permute = True
+        rank = 0 # 单卡推理
 
     def encode(self, speech, speech_lengths):
         """Audio encoder forward pass"""
-        if self.feat_permute:
-            encoder_out, encoder_out_lens = self.audio_encoder(
-                speech.permute(0, 2, 1), speech_lengths
-            )
-        else:
-            encoder_out, encoder_out_lens = self.audio_encoder(speech, speech_lengths)
+        #permute(0, 2, 1) 将 [b, d, T] 转回 [b, T, d]，以匹配编码器的输入要求。若 feat_permute=False，则直接传入 speech（假设已是 [b, T, d]）。这是一个格式适配步骤，确保数据以正确维度顺序传入编码器。
+        encoder_out, encoder_out_lens = self.audio_encoder(speech.permute(0, 2, 1), speech_lengths)
         return encoder_out, encoder_out_lens
 
     def data_template(self, data):
