@@ -14,8 +14,24 @@ from funasr.train_utils.device_funcs import to_device
 from funasr.utils.datadir_writer import DatadirWriter
 from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
 from transformers import AutoConfig, AutoModelForCausalLM
+import json
 
 dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+
+# 删除特定类型的键
+def clean_dict_for_json(data_dict):
+    # 方法1：删除包含 WavFrontend 对象的键
+    keys_to_remove = []
+    for key, value in data_dict.items():
+        # 检查值是否为 WavFrontend 类型
+        if hasattr(value, '__class__') and 'WavFrontend' in str(value.__class__):
+            keys_to_remove.append(key)
+    
+    # 删除这些键
+    for key in keys_to_remove:
+        del data_dict[key]
+    
+    return data_dic
 
 @tables.register("model_classes", "FunASRNano")
 class FunASRNano(nn.Module):
@@ -30,8 +46,9 @@ class FunASRNano(nn.Module):
         input_size: int = 80,
         **kwargs,
     ):
+        data_dict = clean_dict_for_json(kwargs.copy())
         with open('data.json', 'w', encoding='utf-8') as f:
-            json.dump(kwargs, f, ensure_ascii=False, indent=4) 
+            json.dump(data_dict, f, ensure_ascii=False, indent=4) 
         super().__init__()
         encoder_class = tables.encoder_classes.get(audio_encoder)
         audio_encoder = encoder_class(input_size=input_size, **audio_encoder_conf)
