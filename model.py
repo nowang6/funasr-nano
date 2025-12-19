@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import random
@@ -10,9 +9,8 @@ import traceback
 import torch
 import torch.nn as nn
 from funasr import AutoModel
-from funasr.metrics.compute_acc import compute_accuracy
 from funasr.register import tables
-from funasr.train_utils.device_funcs import force_gatherable, to_device
+from funasr.train_utils.device_funcs import to_device
 from funasr.utils.datadir_writer import DatadirWriter
 from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -20,6 +18,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
 
+@tables.register("model_classes", "FunASRNano")
 class FunASRNano(nn.Module):
     def __init__(
         self,
@@ -30,42 +29,20 @@ class FunASRNano(nn.Module):
         llm: str = None,
         llm_conf: dict = None,
         input_size: int = 80,
-        length_normalized_loss: bool = False,
         **kwargs,
     ):
         super().__init__()
-
-        # audio encoder
-        hub = audio_encoder_conf.get("hub", None)
-        self.audio_encoder_activation_checkpoint = audio_encoder_conf.get(
-            "activation_checkpoint", False
-        )
-        if hub == "ms":
-            model = AutoModel(model=audio_encoder, model_revision="master")
-            audio_encoder_output_size = (
-                model.model.encoder_output_size
-                if hasattr(model.model, "encoder_output_size")
-                else -1
-            )
-            audio_encoder = (
-                model.model.model.encoder
-                if hasattr(model.model, "model")
-                else model.model.encoder
-            )
-        else:
-            # audio_encoder=SenceVoiceEncoderSmall
-            encoder_class = tables.encoder_classes.get(audio_encoder)
-            audio_encoder = encoder_class(input_size=input_size, **audio_encoder_conf)
-            audio_encoder_output_size = audio_encoder.output_size()
-        #freeze 默认值为 True，即默认冻结 audio_encoder，不参与训练
+        encoder_class = tables.encoder_classes.get(audio_encoder)
+        audio_encoder = encoder_class(input_size=input_size, **audio_encoder_conf)
+        audio_encoder_output_size = audio_encoder.output_size()
+    
         freeze = audio_encoder_conf.get("freeze", True)
-        freeze_layer_num = int(audio_encoder_conf.get("freeze_layer_num", -1))
-
         if freeze:
             for name, param in audio_encoder.named_parameters():
                 param.requires_grad = False
             audio_encoder.eval()
         self.audio_encoder = audio_encoder
+        
         # llm
         self.llm = None
         init_param_path = llm_conf.get("init_param_path", None)
@@ -80,37 +57,14 @@ class FunASRNano(nn.Module):
             for name, param in model.named_parameters():
                 param.requires_grad = False
             model.eval()
+        
         logging.info(f"use_lora: {llm_conf.get('use_lora', False)}")
-        if llm_conf.get("use_lora", False):
-            from omegaconf import DictConfig, OmegaConf
-
-            lora_conf = llm_conf.get("lora_conf", {})
-            if isinstance(lora_conf, (OmegaConf, DictConfig)):
-                lora_conf = OmegaConf.to_container(lora_conf, resolve=True)
-            from peft import LoraConfig, PeftModel, get_peft_model
-
-            lora_init_param_path = lora_conf.get("init_param_path", None)
-            if lora_init_param_path is not None:
-                logging.info(f"lora_init_param_path: {lora_init_param_path}")
-                model = PeftModel.from_pretrained(model, lora_init_param_path)
-                for name, param in model.named_parameters():
-                    if not lora_conf.get("freeze_lora", False):
-                        if "lora_" in name:
-                            param.requires_grad = True
-            else:
-                peft_config = LoraConfig(**lora_conf)
-                model = get_peft_model(model, peft_config)
-            model.print_trainable_parameters()
-
-        if llm_conf.get("activation_checkpoint", False):
-            model.gradient_checkpointing_enable()
 
         self.llm_dtype = llm_conf.get("llm_dtype", "fp32")
         self.llm = model.to(dtype_map[self.llm_dtype])
         llm_dim = model.get_input_embeddings().weight.shape[-1]
 
         # adaptor
-        # audio_adaptor=Transfomer
         adaptor_class = tables.adaptor_classes.get(audio_adaptor)
         if audio_encoder_output_size > 0:
             audio_adaptor_conf["encoder_dim"] = audio_encoder_output_size
@@ -118,155 +72,30 @@ class FunASRNano(nn.Module):
             llm_dim if llm_dim is not None else audio_adaptor_conf["llm_dim"]
         )
         
-        # 加载权重在funasr/auto/auto_model.py的build_model方法中
         audio_adaptor = adaptor_class(**audio_adaptor_conf)
         freeze = audio_adaptor_conf.get("freeze", False)
-        # freeze 默认值为 False，即默认不冻结 audio_adaptor，参与训练
         if freeze:
             for name, param in audio_adaptor.named_parameters():
                 param.requires_grad = False
             audio_adaptor.eval()
         self.audio_adaptor = audio_adaptor
 
-        self.length_normalized_loss = length_normalized_loss
         self.feat_permute = audio_encoder_conf.get("feat_permute", True)
         rank = int(os.environ.get("RANK", 0))
         logging.info(f"rank: {rank}, model is builded.")
 
-    def forward(
-        self,
-        speech: torch.Tensor = None,
-        speech_lengths: torch.Tensor = None,
-        input_ids: torch.Tensor = None,
-        attention_mask: torch.Tensor = None,
-        labels_ids: torch.Tensor = None,
-        fbank_beg: torch.Tensor = None,
-        fbank_mask: torch.Tensor = None,
-        **kwargs,
-    ):
-        batch_size, token_num = input_ids.shape
-        stats = {}
-        input_ids[input_ids < 0] = 0
-        inputs_embeds = self.llm.model.get_input_embeddings()(input_ids)
-        if speech is not None:
-            if len(speech_lengths.size()) > 1:
-                speech_lengths = speech_lengths[:, 0]
-            batch_size_speech, frames, _ = speech.shape
-
-            # audio encoder
-            if self.audio_encoder_activation_checkpoint:
-                from torch.utils.checkpoint import checkpoint
-
-                encoder_out, encoder_out_lens = checkpoint(
-                    self.encode, speech, speech_lengths, use_reentrant=False
-                )
-            else:
-                encoder_out, encoder_out_lens = self.encode(speech, speech_lengths)
-
-            # audio_adaptor
-            encoder_out, encoder_out_lens = self.audio_adaptor(
-                encoder_out, encoder_out_lens
-            )
-
-            batch_size, token_num, dims = inputs_embeds.shape
-            fake_token_len = kwargs.get("fake_token_len")
-            fake_token_len[fake_token_len < 0] = 0
-            fbank_beg[fbank_beg < 0] = 0
-
-            speech_idx = 0
-            for batch_idx in range(batch_size):
-                for turn_id in range(fbank_beg.shape[1]):
-                    fbank_beg_idx = fbank_beg[batch_idx, turn_id].item()
-                    if fbank_beg_idx > 0:
-                        speech_token_len = fake_token_len[batch_idx, turn_id]
-                        speech_token = encoder_out[speech_idx, :speech_token_len, :]
-
-                        try:
-                            inputs_embeds[
-                                batch_idx,
-                                fbank_beg_idx : fbank_beg_idx + speech_token_len,
-                                :,
-                            ] = speech_token
-                        except Exception as e:
-                            logging.error(f"{str(e)}, {traceback.format_exc()}")
-                            logging.info(
-                                f"batch_idx: {batch_idx}, inputs_embeds: {inputs_embeds.shape}, fbank_beg_idx: {fbank_beg_idx}, speech_token_len: {speech_token_len}, encoder_out: {encoder_out.shape}, encoder_out_lens: {encoder_out_lens}, fake_token_len: {fake_token_len}, speech_lengths: {speech_lengths}"
-                            )
-                            speech_token_len = encoder_out_lens[speech_idx].item()
-                            speech_token = encoder_out[speech_idx, :speech_token_len, :]
-                            inputs_embeds[
-                                batch_idx,
-                                fbank_beg_idx : fbank_beg_idx + speech_token_len,
-                                :,
-                            ] = speech_token
-
-                        speech_idx += 1
-
-            stats["batch_size_speech"] = batch_size_speech
-            stats["batch_size_x_frames"] = frames * batch_size_speech
-            stats["batch_size_real_frames"] = speech_lengths.sum().item()
-            stats["padding_frames"] = (
-                stats["batch_size_x_frames"] - stats["batch_size_real_frames"]
-            )
-
-        with torch.cuda.amp.autocast(
-            enabled=True if self.llm_dtype != "fp32" else False,
-            dtype=dtype_map[self.llm_dtype],
-        ):
-            labels_ids[labels_ids == -1] = -100
-            attention_mask[attention_mask < 0] = 0
-            model_outputs = self.llm(
-                inputs_embeds=inputs_embeds.to(dtype_map[self.llm_dtype]),
-                attention_mask=attention_mask,
-                labels=labels_ids,
-            )
-            loss = model_outputs.loss
-
-        with torch.no_grad():
-            preds = torch.argmax(model_outputs.logits, -1)
-            acc_att = compute_accuracy(
-                preds[:, :-1], labels_ids[:, 1:], ignore_label=-100
-            )
-            stats["acc"] = acc_att
-
-        stats["loss"] = torch.clone(loss.detach())
-        stats["batch_size"] = batch_size
-
-        stats["batch_size_x_tokens"] = token_num * batch_size
-        stats["batch_size_real_tokens"] = attention_mask.sum().item()
-        stats["padding_tokens"] = (
-            stats["batch_size_x_tokens"] - stats["batch_size_real_tokens"]
-        )
-
-        dialog_turns = (fbank_beg > 0).sum(-1)
-        dialog_turns_max = torch.max(dialog_turns).int().item()
-        dialog_turns_avg = dialog_turns.sum().item() / batch_size
-        stats["dialog_turns_max"] = dialog_turns_max
-        stats["dialog_turns_avg"] = dialog_turns_avg
-
-        # force_gatherable: to-device and to-tensor if scalar for DataParallel
-        if self.length_normalized_loss:
-            batch_size = int((labels_ids > 0 + 1).sum())
-        loss, stats, weight = force_gatherable((loss, stats, batch_size), loss.device)
-        return loss, stats, weight
-
-    def forward_export(self, speech, speech_lengths, **kwargs):
-        x, olens = self.audio_encoder(speech, speech_lengths)
-        encoder_out, encoder_out_lens = self.audio_adaptor(x, olens)
-        return encoder_out, encoder_out_lens
-
     def encode(self, speech, speech_lengths):
-        # audio encoder
+        """Audio encoder forward pass"""
         if self.feat_permute:
             encoder_out, encoder_out_lens = self.audio_encoder(
                 speech.permute(0, 2, 1), speech_lengths
             )
         else:
             encoder_out, encoder_out_lens = self.audio_encoder(speech, speech_lengths)
-
         return encoder_out, encoder_out_lens
 
     def data_template(self, data):
+        """Convert data to system/user/assistant format"""
         system, user, assistant = [], [], []
         for i, item in enumerate(data):
             role = item["role"]
@@ -288,12 +117,12 @@ class FunASRNano(nn.Module):
             "user": user,
             "assistant": assistant,
         }
-
         return contents
 
     def data_load_speech(
         self, contents: dict, tokenizer, frontend, meta_data={}, **kwargs
     ):
+        """Load and process speech data for inference"""
         system = contents["system"]
         user = contents["user"]
         assistant = contents["assistant"]
@@ -411,11 +240,9 @@ class FunASRNano(nn.Module):
                 fbank.append(speech[0, :, :])
                 fbank_lens.append(speech_lengths)
 
-        input_ids = torch.tensor(
-            input_ids, dtype=torch.int64
-        )  # [: self.max_token_length]
+        input_ids = torch.tensor(input_ids, dtype=torch.int64)
         attention_mask = torch.tensor([1] * len(input_ids), dtype=torch.int32)
-        labels = torch.tensor(labels, dtype=torch.int64)  # [: self.max_token_length]
+        labels = torch.tensor(labels, dtype=torch.int64)
 
         fbank_mask = torch.tensor(fbank_mask, dtype=torch.float32)
         fbank_beg = torch.tensor(fbank_beg, dtype=torch.int32)
@@ -445,7 +272,6 @@ class FunASRNano(nn.Module):
             "source_ids": source_ids[None, :],
             "target_ids": target_ids[None, :],
         }
-
         return output
 
     def inference_prepare(
@@ -457,6 +283,7 @@ class FunASRNano(nn.Module):
         frontend=None,
         **kwargs,
     ):
+        """Prepare data for inference"""
         meta_data = {}
 
         if kwargs.get("batch_size", 1) > 1:
@@ -472,12 +299,10 @@ class FunASRNano(nn.Module):
         speech = batch["speech"]
 
         if len(speech) > 0:
-            #检查 kwargs 中是否同时存在 "audio_embedding" 和 "audio_embedding_lens"。
-            # 如果都存在：直接使用预计算的嵌入，跳过编码步骤
+            # Check if pre-computed embeddings are provided
             if "audio_embedding" in kwargs and "audio_embedding_lens" in kwargs:
                 encoder_out = kwargs["audio_embedding"]
                 encoder_out_lens = kwargs["audio_embedding_lens"]
-            #执行正常编码流程
             else:
                 speech_lengths = batch["speech_lengths"][:, 0]
                 # fp16
@@ -486,9 +311,6 @@ class FunASRNano(nn.Module):
                 elif kwargs.get("bf16", False):
                     speech = speech.to(torch.bfloat16)
                 # audio encoder
-                # speech.shape [batch_size, feature_dim, frames]
-                # 560 = feature_dim（特征维度，fbank 特征数）
-                # 1351 = frames（时间帧数，与音频长度相关）
                 encoder_out, encoder_out_lens = self.encode(speech, speech_lengths)
 
                 # audio_adaptor
@@ -529,7 +351,6 @@ class FunASRNano(nn.Module):
                             :,
                         ] = speech_token
                     except Exception as e:
-                        #
                         logging.error(f"{str(e)}, {traceback.format_exc()}")
                         logging.info(
                             f"batch_idx: {batch_idx}, inputs_embeds: {inputs_embeds.shape}, fbank_beg_idx: {fbank_beg_idx}, speech_token_len: {speech_token_len}, encoder_out: {encoder_out.shape}, encoder_out_lens: {encoder_out_lens}, fake_token_len: {fake_token_len}, speech_lengths: {speech_lengths}"
@@ -554,6 +375,7 @@ class FunASRNano(nn.Module):
         frontend=None,
         **kwargs,
     ):
+        """Main inference entry point"""
         hotwords = kwargs.get("hotwords", [])
         if len(hotwords) > 0:
             hotwords = ", ".join(hotwords)
@@ -601,12 +423,7 @@ class FunASRNano(nn.Module):
                 )
         data_in = new_data_in
         
-        
-        # 当调用 inference 时未提供 key 参数
-        # 需要为每个输入数据分配唯一标识，可能用于：
-        # 追踪和匹配推理结果
-        # 缓存管理
-        # 日志记录
+        # Generate keys if not provided
         if key is None:
             key = []
             for _ in data_in:
@@ -633,7 +450,8 @@ class FunASRNano(nn.Module):
         frontend=None,
         **kwargs,
     ):
-        # 把音频转换为embeds
+        """LLM inference"""
+        # Convert audio to embeddings
         inputs_embeds, contents, batch, source_ids, meta_data = self.inference_prepare(
             data_in, data_lengths, key, tokenizer, frontend, **kwargs
         )
@@ -718,6 +536,7 @@ class FunASRNano(nn.Module):
 
     @staticmethod
     def from_pretrained(model: str = None, **kwargs):
+        """Load pretrained model"""
         from funasr import AutoModel
 
         model, kwargs = AutoModel.build_model(

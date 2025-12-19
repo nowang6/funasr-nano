@@ -1,4 +1,4 @@
-from model_infer_only import FunASRNano
+from model import FunASRNano
 
 
 def main():
