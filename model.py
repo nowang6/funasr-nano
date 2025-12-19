@@ -14,8 +14,11 @@ from funasr.train_utils.device_funcs import to_device
 from funasr.utils.datadir_writer import DatadirWriter
 from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
 from transformers import AutoConfig, AutoModelForCausalLM
+from funasr.models.sense_voice.model import SenseVoiceEncoderSmall
 
 dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+
+dtypte = "bf16"
 
 
 @tables.register("model_classes", "FunASRNano")
@@ -32,8 +35,7 @@ class FunASRNano(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        encoder_class = tables.encoder_classes.get(audio_encoder)
-        audio_encoder = encoder_class(input_size=input_size, **audio_encoder_conf)
+        audio_encoder = SenseVoiceEncoderSmall(input_size=input_size, **audio_encoder_conf)
         audio_encoder_output_size = audio_encoder.output_size()
     
         freeze = audio_encoder_conf.get("freeze", True)
@@ -44,24 +46,11 @@ class FunASRNano(nn.Module):
         self.audio_encoder = audio_encoder
         
         # llm
-        self.llm = None
         init_param_path = llm_conf.get("init_param_path", None)
-        llm_dim = None
-
         llm_load_kwargs = llm_conf.get("load_kwargs", {})
         config = AutoConfig.from_pretrained(init_param_path)
         model = AutoModelForCausalLM.from_config(config, **llm_load_kwargs)
-
-        freeze = llm_conf.get("freeze", True)
-        if freeze:
-            for name, param in model.named_parameters():
-                param.requires_grad = False
-            model.eval()
-        
-        logging.info(f"use_lora: {llm_conf.get('use_lora', False)}")
-
-        self.llm_dtype = llm_conf.get("llm_dtype", "fp32")
-        self.llm = model.to(dtype_map[self.llm_dtype])
+        self.llm = model.to(dtype_map[dtypte])
         llm_dim = model.get_input_embeddings().weight.shape[-1]
 
         # adaptor
