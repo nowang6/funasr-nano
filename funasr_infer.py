@@ -29,6 +29,7 @@ def main():
         vad_kwargs={"max_single_segment_time": 30000},
         remote_code="./model.py",
         device="cuda:0",
+        disalbe_update=True
     )
     res = model.generate(input=[wav_path], cache={}, batch_size=1)
     text = res[0]["text"]
