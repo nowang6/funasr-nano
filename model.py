@@ -21,6 +21,9 @@ dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float3
 
 dtypte = "bf16"
 
+llm_dim = 1024
+encoder_dim = 512
+
 
 @tables.register("model_classes", "FunASRNano")
 class FunASRNano(nn.Module):
@@ -39,7 +42,7 @@ class FunASRNano(nn.Module):
         
         # audio_encoder
         audio_encoder = SenseVoiceEncoderSmall(input_size=input_size, **audio_encoder_conf)
-        audio_encoder_output_size = audio_encoder.output_size() # 512
+        self.audio_encoder = audio_encoder
         
         # llm
         init_param_path = llm_conf.get("init_param_path", None)
@@ -47,17 +50,12 @@ class FunASRNano(nn.Module):
         config = AutoConfig.from_pretrained(init_param_path)
         model = AutoModelForCausalLM.from_config(config, **llm_load_kwargs)
         self.llm = model.to(dtype_map[dtypte])
-        llm_dim = model.get_input_embeddings().weight.shape[-1]
 
         # adaptor
-        audio_adaptor_conf["encoder_dim"] = 512
-        audio_adaptor_conf["llm_dim"] = 1024
-        
+        audio_adaptor_conf["encoder_dim"] = encoder_dim
+        audio_adaptor_conf["llm_dim"] = llm_dim
         audio_adaptor = Transformer(**audio_adaptor_conf)
         self.audio_adaptor = audio_adaptor
-
-        self.feat_permute = True
-        rank = 0 # 单卡推理
 
     def encode(self, speech, speech_lengths):
         """Audio encoder forward pass"""
@@ -187,8 +185,8 @@ class FunASRNano(nn.Module):
                             / 1000
                         )
 
-                        if self.feat_permute:
-                            speech = speech.permute(0, 2, 1)
+                        
+                        speech = speech.permute(0, 2, 1)
 
                         olens = 1 + (speech_lengths[0].item() - 3 + 2 * 1) // 2
                         olens = 1 + (olens - 3 + 2 * 1) // 2
