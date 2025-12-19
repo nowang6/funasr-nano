@@ -17,7 +17,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
-
 @tables.register("model_classes", "FunASRNano")
 class FunASRNano(nn.Module):
     def __init__(
@@ -31,9 +30,9 @@ class FunASRNano(nn.Module):
         input_size: int = 80,
         **kwargs,
     ):
+        with open('data.json', 'w', encoding='utf-8') as f:
+            json.dump(kwargs, f, ensure_ascii=False, indent=4) 
         super().__init__()
-
-
         encoder_class = tables.encoder_classes.get(audio_encoder)
         audio_encoder = encoder_class(input_size=input_size, **audio_encoder_conf)
         audio_encoder_output_size = audio_encoder.output_size()

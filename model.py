@@ -20,7 +20,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
 
-@tables.register("model_classes", "FunASRNano")
 class FunASRNano(nn.Module):
     def __init__(
         self,

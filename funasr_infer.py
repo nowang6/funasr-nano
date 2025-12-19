@@ -18,6 +18,7 @@ def main():
         hotwords=["开放时间"],
         language="zh", # auto, zh, en, ja
         itn=True, # or False
+        disalbe_update=True
     )
     text = res[0]["text"]
     print(text)
