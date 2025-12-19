@@ -26,12 +26,20 @@ def clean_dict_for_json(data_dict):
         # 检查值是否为 WavFrontend 类型
         if hasattr(value, '__class__') and 'WavFrontend' in str(value.__class__):
             keys_to_remove.append(key)
+        # 检查值是否为 WavFrontend 类型
+        if hasattr(value, '__class__') and 'Qwen2TokenizerFast' in str(value.__class__):
+            keys_to_remove.append(key)
+        
+        # 检查值是否为 WavFrontend 类型
+        if hasattr(value, '__class__') and 'Tokenizer' in str(value.__class__):
+            keys_to_remove.append(key)
+    
     
     # 删除这些键
     for key in keys_to_remove:
         del data_dict[key]
     
-    return data_dic
+    return     
 
 @tables.register("model_classes", "FunASRNano")
 class FunASRNano(nn.Module):
