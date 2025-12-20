@@ -13,9 +13,11 @@ from funasr.register import tables
 from funasr.train_utils.device_funcs import to_device
 from funasr.utils.datadir_writer import DatadirWriter
 from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from funasr.models.sense_voice.model import SenseVoiceEncoderSmall
 from funasr.models.llm_asr.adaptor import Transformer
+from funasr.train_utils.load_pretrained_model import load_pretrained_model
+from funasr.frontends.wav_frontend import WavFrontend
 
 dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
@@ -24,6 +26,10 @@ dtypte = "bf16"
 llm_dim = 1024
 encoder_dim = 512
 
+
+global_audio_encoder_conf = {'output_size': 512, 'attention_heads': 4, 'linear_units': 2048, 'num_blocks': 50, 'tp_blocks': 20, 'dropout_rate': 0.1, 'positional_dropout_rate': 0.1, 'attention_dropout_rate': 0.1, 'input_layer': 'pe', 'pos_enc_class': 'SinusoidalPositionEncoder', 'normalize_before': True, 'kernel_size': 11, 'sanm_shfit': 0, 'selfattention_layer_type': 'sanm', 'freeze': True, 'freeze_layer_num': -1, 'feat_permute': True}
+global_audio_adaptor_conf = {'downsample_rate': 1, 'ffn_dim': 2048, 'llm_dim': 1024, 'encoder_dim': 512, 'n_layer': 2, 'freeze': True}
+global_llm_conf = {'hub': 'hf', 'freeze': True, 'llm_dtype': 'bf16', 'init_param_path': 'models/Fun-ASR-Nano-2512/Qwen3-0.6B', 'use_lora': False, 'lora_conf': {'freeze_lora': True, 'task_type': 'CAUSAL_LM', 'r': 16, 'lora_alpha': 32, 'lora_dropout': 0.05, 'bias': 'none', 'target_modules': ['q_proj', 'v_proj'], 'init_param_path': ''}}
 
 @tables.register("model_classes", "FunASRNano")
 class FunASRNano(nn.Module):
@@ -35,27 +41,28 @@ class FunASRNano(nn.Module):
         audio_adaptor_conf: dict = None,
         llm: str = None,
         llm_conf: dict = None,
-        input_size: int = 80,
+        input_size: int = 560,
         **kwargs,
     ):
         super().__init__()
         
         # audio_encoder
-        audio_encoder = SenseVoiceEncoderSmall(input_size=input_size, **audio_encoder_conf)
+        audio_encoder = SenseVoiceEncoderSmall(input_size=input_size, **global_audio_encoder_conf)
         self.audio_encoder = audio_encoder
         
+        
+        # adaptor
+        audio_adaptor = Transformer(**global_audio_adaptor_conf)
+        self.audio_adaptor = audio_adaptor
+        
         # llm
-        init_param_path = llm_conf.get("init_param_path", None)
-        llm_load_kwargs = llm_conf.get("load_kwargs", {})
+        init_param_path = global_llm_conf.get("init_param_path", None)
+        llm_load_kwargs = global_llm_conf.get("load_kwargs", {})
         config = AutoConfig.from_pretrained(init_param_path)
         model = AutoModelForCausalLM.from_config(config, **llm_load_kwargs)
         self.llm = model.to(dtype_map[dtypte])
 
-        # adaptor
-        audio_adaptor_conf["encoder_dim"] = encoder_dim
-        audio_adaptor_conf["llm_dim"] = llm_dim
-        audio_adaptor = Transformer(**audio_adaptor_conf)
-        self.audio_adaptor = audio_adaptor
+
 
     def encode(self, speech, speech_lengths):
         """Audio encoder forward pass"""
@@ -254,10 +261,6 @@ class FunASRNano(nn.Module):
     ):
         """Prepare data for inference"""
         meta_data = {}
-
-        if kwargs.get("batch_size", 1) > 1:
-            raise NotImplementedError("batch decoding is not implemented")
-
         contents = self.data_template(data_in[0])
         output = self.data_load_speech(
             contents, tokenizer, frontend, meta_data=meta_data, **kwargs
@@ -502,14 +505,61 @@ class FunASRNano(nn.Module):
             ibest_writer["text_tn"][key[0]] = response_clean
 
         return results, meta_data
+    
+    # @staticmethod
+    # def from_pretrained(model: str = None, **kwargs):
+    #     """Load pretrained model"""
+    #     model, kwargs = AutoModel.build_model(
+    #         model=model, trust_remote_code=True, **kwargs
+    #     )
+        
+    #     return model, kwargs
 
     @staticmethod
-    def from_pretrained(model: str = None, **kwargs):
-        """Load pretrained model"""
-        from funasr import AutoModel
+    def from_pretrained(**kwargs):
+        
+        model = FunASRNano()
+        ckpt = torch.load("models/Fun-ASR-Nano-2512/model.pt", map_location="cpu")
+        state_dict = ckpt["state_dict"]
+            
+        # 去掉 DDP 的 module. 
+        state_dict = {
+            k.replace("module.", ""): v
+            for k, v in state_dict.items()
+        }
 
-        model, kwargs = AutoModel.build_model(
-            model=model, trust_remote_code=True, **kwargs
-        )
-
+        model.load_state_dict(state_dict)
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+        model.eval()
+        
+        # 添加tokenizer
+        tokenizer = AutoTokenizer.from_pretrained("models/Fun-ASR-Nano-2512/Qwen3-0.6B")
+        kwargs["tokenizer"] = tokenizer
+        
+        #添加 frontend
+        frontend_conf = {
+            "fs": 16000,
+            "window": "hamming",
+            "n_mels": 80,
+            "frame_length": 25,
+            "frame_shift": 10,
+            "lfr_m": 7,
+            "lfr_n": 6,
+            "cmvn_file": None,
+        }
+        frontend = WavFrontend(**frontend_conf)
+        kwargs["frontend"] = frontend
+        
         return model, kwargs
+   
+
+if __name__ == "__main__":
+    
+    model, kwargs = FunASRNano.from_pretrained(device="cuda:0",disalbe_update=True)
+    model.eval()
+
+    wav_path = f"data/近远场测试.wav"
+    res = model.inference(data_in=[wav_path], **kwargs)
+    text = res[0][0]["text"]
+    print(text)

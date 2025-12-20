@@ -1,0 +1,26 @@
+{
+    "lsm_weight": 0.1,
+    "length_normalized_loss": true,
+    "model": "FunASRNano",
+    "model_conf": {
+        "lsm_weight": 0.1,
+        "length_normalized_loss": true
+    },
+    "ctc_decoder": "Transformer",
+    "detach_ctc_decoder": true,
+    "ctc_decoder_conf": {
+        "downsample_rate": 1,
+        "ffn_dim": 2048,
+        "llm_dim": 512,
+        "encoder_dim": 512,
+        "n_layer": 5,
+        "freeze": false
+    },
+    "ctc_weight": 1.0,
+    "ctc_conf": {
+        "dropout_rate": 0.0,
+        "ctc_type": "builtin",
+        "reduce": true,
+        "ignore_nan_grad": true
+    },
+    "frontend": 
