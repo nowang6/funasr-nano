@@ -5,9 +5,11 @@ import os
 model_path = "weights/Fun-ASR-Nano-2512"
 save_dir = "saved_tensors"
 
+device = torch.device("cpu")
+
 if __name__ == "__main__":
 
-    model, kwargs = FunASRNano.from_pretrained(model_path=model_path, device="cuda:0", disalbe_update=True)
+    model, kwargs = FunASRNano.from_pretrained(model_path=model_path, device=device, disalbe_update=True)
     model.eval()
     
     audio_encoder = model.audio_encoder
@@ -28,7 +30,6 @@ if __name__ == "__main__":
     print(f"  encoder_out_lens: {encoder_out_lens_original.shape}")
     
     # 将输入移到正确的设备
-    device = next(audio_encoder.parameters()).device
     speech = speech.to(device)
     speech_lengths = speech_lengths.to(device)
     

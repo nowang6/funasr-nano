@@ -497,7 +497,7 @@ class FunASRNano(nn.Module):
 
 
     @staticmethod
-    def from_pretrained(model_path: str = None, **kwargs):
+    def from_pretrained(model_path: str = None, device, **kwargs):
 
         model = FunASRNano(model_path=model_path)
         ckpt = torch.load(f"{model_path}/model.pt",
@@ -512,7 +512,6 @@ class FunASRNano(nn.Module):
         }
 
         model.load_state_dict(state_dict)
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         model.to(device)
         model.eval()
 
