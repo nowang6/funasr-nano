@@ -7,7 +7,6 @@ from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from models.SenseVoiceEncoderSmall import SenseVoiceEncoderSmall
 from models.Transfomer import Transformer
-from funasr.train_utils.load_pretrained_model import load_pretrained_model
 from funasr.frontends.wav_frontend import WavFrontend
 from const import dtype_map, dtypte, encoder_conf, adaptor_conf, llm_conf, hotwords
 import string
@@ -275,14 +274,28 @@ class FunASRNano(nn.Module):
                     speech = speech.to(torch.float16)
                 elif kwargs.get("bf16", False):
                     speech = speech.to(torch.bfloat16)
+                
+                # 保存模型输入到本地文件
+                save_dir = kwargs.get("save_tensors_dir", "saved_tensors")
+                os.makedirs(save_dir, exist_ok=True)
+                timestamp = int(time.time() * 1000)  # 使用时间戳作为文件名
+                torch.save(speech, os.path.join(save_dir, f"speech_{timestamp}.pt"))
+                torch.save(speech_lengths, os.path.join(save_dir, f"speech_lengths_{timestamp}.pt"))
+                
                 # audio encoder
                 encoder_out, encoder_out_lens = self.encode(
                     speech, speech_lengths)
+                
+                # 保存模型输出到本地文件
+                torch.save(encoder_out, os.path.join(save_dir, f"encoder_out_{timestamp}.pt"))
+                torch.save(encoder_out_lens, os.path.join(save_dir, f"encoder_out_lens_{timestamp}.pt"))
 
                 # audio_adaptor
                 encoder_out, encoder_out_lens = self.audio_adaptor(
                     encoder_out, encoder_out_lens
                 )
+                torch.save(encoder_out, os.path.join(save_dir, f"audio_adaptor_out_{timestamp}.pt"))
+                torch.save(encoder_out_lens, os.path.join(save_dir, f"encoder_out_lens_{timestamp}.pt"))
                 meta_data["audio_adaptor_out"] = encoder_out
                 meta_data["audio_adaptor_out_lens"] = encoder_out_lens
 
