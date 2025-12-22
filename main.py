@@ -11,7 +11,7 @@ if __name__ == "__main__":
     model.eval()
     
     audio_encoder = SenseVoiceEncoderSmall(input_size=encoder_in_dim, **encoder_conf)
-    ckpt = torch.load(f"{model_saved_models}/audio_encoder.pt", map_location="cpu")
+    ckpt = torch.load(f"model_saved_models/audio_encoder.pt", map_location="cpu")
     state_dict = ckpt["state_dict"]
     audio_encoder.load_state_dict(state_dict)
     
