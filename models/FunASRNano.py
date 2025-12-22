@@ -497,7 +497,7 @@ class FunASRNano(nn.Module):
 
 
     @staticmethod
-    def from_pretrained(model_path: str = None, device, **kwargs):
+    def from_pretrained(model_path: str = None, device=None, **kwargs):
 
         model = FunASRNano(model_path=model_path)
         ckpt = torch.load(f"{model_path}/model.pt",
