@@ -22,7 +22,7 @@ if __name__ == "__main__":
     audio_adaptor.load_state_dict(ckpt)
     model.audio_adaptor = audio_adaptor
     
-    model.to("cuda:0")
+    model = model.to("cuda:0")
     model.eval()
     wav_path = f"data/创建警单.wav"
     res = model.inference(wav_path=wav_path, **kwargs)

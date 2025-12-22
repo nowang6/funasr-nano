@@ -1,17 +1,16 @@
 from models.FunASRNano import FunASRNano
 import torch
 import os
-
+from models.SenseVoiceEncoderSmall import SenseVoiceEncoderSmall
+from const import encoder_conf, encoder_in_dim
 model_path = "weights/Fun-ASR-Nano-2512"
 save_dir = "saved_tensors"
 
 if __name__ == "__main__":
 
-    model, kwargs = FunASRNano.from_pretrained(model_path=model_path, device="cuda:0", disalbe_update=True)
-    model.eval()
-    
-    audio_encoder = model.audio_encoder
-    audio_encoder.eval()
+    audio_encoder = SenseVoiceEncoderSmall(input_size=encoder_in_dim, **encoder_conf)
+    ckpt = torch.load(f"saved_models/audio_encoder.pt", map_location="cpu")
+    audio_encoder.load_state_dict(ckpt)
     
     # 从文件加载输入和输出
     print("Loading tensors from files...")
