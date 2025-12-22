@@ -2,7 +2,8 @@ import torch
 import os
 from models.FunASRNano import FunASRNano
 from models.SenseVoiceEncoderSmall import SenseVoiceEncoderSmall
-from const import encoder_conf, encoder_in_dim
+from models.Transfomer import Transformer
+from const import encoder_conf, encoder_in_dim, adaptor_conf
 model_path = "weights/Fun-ASR-Nano-2512"
 
 if __name__ == "__main__":
