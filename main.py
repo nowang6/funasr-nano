@@ -11,16 +11,7 @@ if __name__ == "__main__":
     model, kwargs = FunASRNano.from_pretrained(model_path=model_path, device="cuda:0", disalbe_update=True)
     model.eval()
     
-    audio_encoder = SenseVoiceEncoderSmall(input_size=encoder_in_dim, **encoder_conf)
-    ckpt = torch.load(f"saved_models/audio_encoder.pt", map_location="cpu")
-    audio_encoder.load_state_dict(ckpt)
-    model.audio_encoder = audio_encoder
-    
-    
-    audio_adaptor = Transformer(**adaptor_conf)
-    ckpt = torch.load(f"saved_models/audio_adaptor.pt", map_location="cpu")
-    audio_adaptor.load_state_dict(ckpt)
-    model.audio_adaptor = audio_adaptor
+   
     
     model = model.to("cuda:0")
     model.eval()

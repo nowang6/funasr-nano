@@ -275,27 +275,17 @@ class FunASRNano(nn.Module):
                 elif kwargs.get("bf16", False):
                     speech = speech.to(torch.bfloat16)
                 
-                # 保存模型输入到本地文件
-                save_dir = kwargs.get("save_tensors_dir", "saved_tensors")
-                os.makedirs(save_dir, exist_ok=True)
-                timestamp = int(time.time() * 1000)  # 使用时间戳作为文件名
-                torch.save(speech, os.path.join(save_dir, f"speech_{timestamp}.pt"))
-                torch.save(speech_lengths, os.path.join(save_dir, f"speech_lengths_{timestamp}.pt"))
-                
+              
                 # audio encoder
                 encoder_out, encoder_out_lens = self.encode(
                     speech, speech_lengths)
                 
-                # 保存模型输出到本地文件
-                torch.save(encoder_out, os.path.join(save_dir, f"encoder_out_{timestamp}.pt"))
-                torch.save(encoder_out_lens, os.path.join(save_dir, f"encoder_out_lens_{timestamp}.pt"))
-
+        
                 # audio_adaptor
                 encoder_out, encoder_out_lens = self.audio_adaptor(
                     encoder_out, encoder_out_lens
                 )
-                torch.save(encoder_out, os.path.join(save_dir, f"audio_adaptor_out_{timestamp}.pt"))
-                torch.save(encoder_out_lens, os.path.join(save_dir, f"encoder_out_lens_{timestamp}.pt"))
+                
                 meta_data["audio_adaptor_out"] = encoder_out
                 meta_data["audio_adaptor_out_lens"] = encoder_out_lens
 
