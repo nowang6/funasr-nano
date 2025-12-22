@@ -9,7 +9,8 @@ dtype_map = {
 dtypte = "bf16"
 
 llm_dim = 1024
-encoder_dim = 512
+encoder_in_dim = 560
+encoder_out_dim = 512
 
 hotwords = ['张三疯', '警单']
 
