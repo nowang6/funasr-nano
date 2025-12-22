@@ -11,11 +11,18 @@ if __name__ == "__main__":
     model.eval()
     
     audio_encoder = SenseVoiceEncoderSmall(input_size=encoder_in_dim, **encoder_conf)
-    ckpt = torch.load(f"model_saved_models/audio_encoder.pt", map_location="cpu")
-    state_dict = ckpt["state_dict"]
-    audio_encoder.load_state_dict(state_dict)
-    
+    ckpt = torch.load(f"saved_models/audio_encoder.pt", map_location="cpu")
+    audio_encoder.load_state_dict(ckpt)
     model.audio_encoder = audio_encoder
+    
+    
+    audio_adaptor = Transformer(**adaptor_conf)
+    ckpt = torch.load(f"saved_models/audio_adaptor.pt", map_location="cpu")
+    audio_adaptor.load_state_dict(ckpt)
+    model.audio_adaptor = audio_adaptor
+    
+    model.to("cuda:0")
+    model.eval()
     wav_path = f"data/创建警单.wav"
     res = model.inference(wav_path=wav_path, **kwargs)
     text = res[0][0]["text"]
