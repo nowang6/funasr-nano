@@ -6,9 +6,10 @@ from funasr.utils.datadir_writer import DatadirWriter
 from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from models.SenseVoiceEncoderSmall import SenseVoiceEncoderSmall
+from models.ASREncoder import ASREncoder
 from models.Transfomer import Transformer
 from funasr.frontends.wav_frontend import WavFrontend
-from const import dtype_map, dtypte, encoder_conf, adaptor_conf, llm_conf, hotwords
+from const import dtype_map, dtypte, encoder_conf, adaptor_conf, llm_conf, hotwords, MAX_NEW_TOKENS
 import string
 import time
 import traceback
@@ -23,28 +24,13 @@ import re
 class FunASRNano(nn.Module):
     def __init__(
         self,
-        model_path: str = None,
-        audio_encoder: str = None,
-        audio_adaptor: str = None,
-        llm: str = None,
-        input_size: int = 560,
-        **kwargs,
+        encoder: ASREncoder,
+        llm: AutoModelForCausalLM,
     ):
         super().__init__()
-
-        # audio_encoder
-        audio_encoder = SenseVoiceEncoderSmall(
-            input_size=input_size, **encoder_conf)
-        self.audio_encoder = audio_encoder
-
-        # adaptor
-        audio_adaptor = Transformer(**adaptor_conf)
-        self.audio_adaptor = audio_adaptor
-        # llm
-        llm_load_kwargs = llm_conf.get("load_kwargs", {})
-        config = AutoConfig.from_pretrained(f"{model_path}/Qwen3-0.6B")
-        model = AutoModelForCausalLM.from_config(config, **llm_load_kwargs)
-        self.llm = model.to(dtype_map[dtypte])
+        self.encoder = encoder
+        self.llm = llm
+     
 
     def encode(self, speech, speech_lengths):
         """Audio encoder forward pass"""
@@ -257,7 +243,8 @@ class FunASRNano(nn.Module):
         output = self.data_load_speech(
             contents, tokenizer, frontend, meta_data=meta_data, **kwargs
         )
-        batch = to_device(output, kwargs["device"])
+
+        batch = to_device(output, self.llm.device)
 
         # audio encoder
         speech = batch["speech"]
@@ -276,15 +263,21 @@ class FunASRNano(nn.Module):
                     speech = speech.to(torch.bfloat16)
                 
               
-                # audio encoder
-                encoder_out, encoder_out_lens = self.encode(
-                    speech, speech_lengths)
+                # # audio encoder
+                # encoder_out, encoder_out_lens = self.encode(
+                #     speech, speech_lengths)
                 
         
-                # audio_adaptor
-                encoder_out, encoder_out_lens = self.audio_adaptor(
-                    encoder_out, encoder_out_lens
-                )
+                # # audio_adaptor
+                # encoder_out, encoder_out_lens = self.audio_adaptor(
+                #     encoder_out, encoder_out_lens
+                # )
+
+                # permute(0, 2, 1) 将 [b, d, T] 转回 [b, T, d]，以匹配编码器的输入要求
+                
+                speech = speech.permute(0, 2, 1)
+                
+                encoder_out, encoder_out_lens = self.encoder(speech, speech_lengths)
                 
                 meta_data["audio_adaptor_out"] = encoder_out
                 meta_data["audio_adaptor_out_lens"] = encoder_out_lens
@@ -414,51 +407,22 @@ class FunASRNano(nn.Module):
             label = contents["assistant"][-1]
             self.llm = self.llm.to(dtype_map[llm_dtype])
             inputs_embeds = inputs_embeds.to(dtype_map[llm_dtype])
-            llm_kwargs = kwargs.get("llm_kwargs", {})
 
-            # 当 teachforing=False（默认）时：
-            # 使用 self.llm.generate() 进行自回归生成
-            # 模型基于输入逐步生成输出
-            # 这是正常的推理模式
-            # 当 teachforing=True 时：
-            # 使用 self.llm() 进行前向传播
-            # 使用真实标签（ground truth）计算 loss
-            # 从 logits 中直接提取预测结果，而不是生成
-            # 通常用于评估或调试
-            if not kwargs.get("teachforing", False):
-                generated_ids = self.llm.generate(
-                    inputs_embeds=inputs_embeds,
-                    max_new_tokens=kwargs.get("max_length", 512),
-                    **llm_kwargs,
-                )
+            # Save inputs_embeds to saved_tensors
+            # torch.save(inputs_embeds, "saved_tensors/llm_inputs_embeds.pt")
+    
+            generated_ids = self.llm.generate(
+                inputs_embeds=inputs_embeds,
+                max_new_tokens=MAX_NEW_TOKENS
+            )
 
-                response = tokenizer.batch_decode(
-                    generated_ids,
-                    skip_special_tokens=kwargs.get(
-                        "skip_special_tokens", True),
-                )[0]
+            response = tokenizer.batch_decode(
+                generated_ids,
+                skip_special_tokens=kwargs.get(
+                    "skip_special_tokens", True),
+            )[0]
 
-                loss = None
-            else:
-                labels_ids = batch["labels_ids"]
-                labels_ids[labels_ids == -1] = -100
-                attention_mask = batch.get("attention_mask", None)
-                model_outputs = self.llm(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    labels=labels_ids,
-                    **llm_kwargs,
-                )
-
-                preds = torch.argmax(
-                    model_outputs.logits, -1)[:, source_ids.shape[1]:]
-                response = tokenizer.batch_decode(
-                    preds,
-                    add_special_tokens=False,
-                    skip_special_tokens=kwargs.get(
-                        "skip_special_tokens", True),
-                )[0]
-                loss = model_outputs.loss.item()
+            loss = None
 
         ibest_writer = None
         if kwargs.get("output_dir") is not None:
@@ -487,28 +451,25 @@ class FunASRNano(nn.Module):
 
 
     @staticmethod
-    def from_pretrained(model_path: str = None, **kwargs):
-
-        model = FunASRNano(model_path=model_path)
-        ckpt = torch.load(f"{model_path}/model.pt",
-                          map_location="cpu")
+    def from_pretrained(model_path: str = None, device: torch.device = None, **kwargs):
+        # 加载 encoder
+        encoder = ASREncoder()
+        ckpt = torch.load(f"{model_path}/encoder.pt", map_location="cpu")
         
-        state_dict = ckpt["state_dict"]
 
-        # 去掉 DDP 的 module.
-        state_dict = {
-            k.replace("module.", ""): v
-            for k, v in state_dict.items()
-        }
+        encoder.load_state_dict(ckpt)
+       
+        # 加载 llm
+        llm = AutoModelForCausalLM.from_pretrained(f"{model_path}/llm")
 
-        model.load_state_dict(state_dict)
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        model.to(device)
+        # 加载模型
+        model = FunASRNano(encoder=encoder, llm=llm).to(device)
+
         model.eval()
 
-        # 添加tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            f"{model_path}/Qwen3-0.6B")
+
+        # 添加kwargs的参数
+        tokenizer = AutoTokenizer.from_pretrained("weights/llm")
         kwargs["tokenizer"] = tokenizer
 
         # 添加 frontend

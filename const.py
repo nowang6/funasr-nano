@@ -62,3 +62,7 @@ llm_conf = {
         'init_param_path': ''
     }
 }
+
+MAX_NEW_TOKENS = 512
+
+input_size = 560
